@@ -8,6 +8,8 @@
 #include <switch.h>
 #include <switch_curl.h>
 #include <stdlib.h>
+#include <cctype>
+#include <iomanip>
 
 using namespace std;
 

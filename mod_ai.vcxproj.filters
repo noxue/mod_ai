@@ -3,11 +3,9 @@
   <ItemGroup>
     <ClCompile Include="ai.cpp" />
     <ClCompile Include="asr.cpp" />
-    <ClCompile Include="base64.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="typedefs.h" />
     <ClInclude Include="asr.h" />
-    <ClInclude Include="base64.h" />
   </ItemGroup>
 </Project>

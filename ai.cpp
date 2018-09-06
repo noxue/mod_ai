@@ -16,12 +16,15 @@ using namespace std;
 typedef struct {
 	switch_media_bug_t *bug;
 	switch_core_session_t *session;
-	char *pcmBuf;			  // 保存要发送识别的数据内容
-	int pcmBufLen;			  //数据长度
-	bool isSpeakStart;		  // 是否已经开始说话
-	short muteFrames;		  // 静音的数据包数目
+	switch_channel_t *channel;
+	char *pcmBuf;			   // 保存要发送识别的数据内容
+	int pcmBufLen;			   //数据长度
+	bool isSpeakStart;		   // 是否已经开始说话
+	short muteFrames;		   // 静音的数据包数目
 	string destination_number; // 被呼叫号码
-	string uuid; // 通话的uuid
+	string uuid;			   // 通话的uuid
+	string filename;		   // 保存每一句用于识别的话的路径
+	FILE *fp;				   // 保存每个用于识别的文件句柄
 } switch_no_t;
 
 #define PCM_MAXBUF (sizeof(char) * 160 * 50 * 100)
@@ -72,21 +75,32 @@ SWITCH_STANDARD_APP(ai_app)
 	switch_status_t status;
 
 	switch_no_t *pvt;
-	
 
 	if (!(pvt = (switch_no_t *)switch_core_session_alloc(session, sizeof(switch_no_t)))) { return; }
-
 
 	pvt->session = session;
 	pvt->pcmBuf = (char *)switch_core_session_alloc(session, PCM_MAXBUF);
 	pvt->pcmBufLen = 0;
 	pvt->muteFrames = 0;
 
-	auto channel = switch_core_session_get_channel(session);
-	pvt->destination_number = switch_channel_get_variable(channel, "channel_name");
-	pvt->destination_number = pvt->destination_number.substr(pvt->destination_number.find_last_of('/')+1);
+	pvt->channel = switch_core_session_get_channel(session);
+	if (pvt->channel == nullptr) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "获取channel失败\n");
+		return;
+	}
+	pvt->destination_number = switch_channel_get_variable(pvt->channel, "channel_name");
+	pvt->destination_number = pvt->destination_number.substr(pvt->destination_number.find_last_of('/') + 1);
 
-	pvt->uuid = switch_channel_get_variable(channel, "uuid");
+	pvt->uuid = switch_channel_get_variable(pvt->channel, "uuid");
+
+	/*{
+		switch_frame_t *read_frame;
+		status = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
+		if (!SWITCH_READ_ACCEPTABLE(status)) { return; }
+		switch_core_session_write_frame(session, read_frame, SWITCH_IO_FLAG_NONE, 0);
+	}*/
+
+	// if (switch_channel_pre_answer(pvt->channel) != SWITCH_STATUS_SUCCESS) { return ; }
 
 	if ((status = switch_core_media_bug_add(session, "asr_read", NULL, read_callback, pvt, 0,
 											SMBF_READ_REPLACE | SMBF_NO_PAUSE | SMBF_ONE_ONLY, &(pvt->bug))) !=
@@ -163,7 +177,6 @@ SWITCH_STANDARD_API(uuid_play)
 		switch_channel_set_variable(channel, SWITCH_CURRENT_APPLICATION_RESPONSE_VARIABLE, "PLAYBACK ERROR");
 		break;
 	}
-
 	return SWITCH_STATUS_SUCCESS;
 }
 
@@ -240,9 +253,38 @@ SWITCH_STANDARD_API(uuid_stop)
 
 SWITCH_STANDARD_API(uuid_asr) { return SWITCH_STATUS_SUCCESS; }
 
+
+void *asr(switch_thread_t *thread,void *data)
+{
+	switch_no_t *pvt = (switch_no_t *)data;
+
+	Asr asr;
+	auto ret = asr.xfAsr("5adf1c1e", "8a413009f6cfa9346692736688361bfa", pvt->pcmBuf, pvt->pcmBufLen);
+
+	pvt->pcmBufLen = 0;
+
+	{ // 事件通知业务程序
+		switch_event_t *event = NULL;
+		if (switch_event_create(&event, SWITCH_EVENT_CUSTOM) == SWITCH_STATUS_SUCCESS) {
+			event->subclass_name = strdup("asr::end_speak");
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Event-Name", event->subclass_name);
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Caller-Unique-ID", pvt->uuid.c_str());
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Caller-Destination-Number",
+										   pvt->destination_number.c_str());
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Word", ret->text.c_str());
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "filename", pvt->filename.c_str());
+			cout << ret->text.c_str() << endl;
+			switch_event_fire(&event);
+		}
+	}
+	delete ret;
+	return NULL;
+}
+
+
 static switch_bool_t read_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type)
 {
-	static int word = 0;
+	static int word = 0; // 记录说了几句话
 	switch_no_t *pvt = (switch_no_t *)user_data;
 	if (nullptr == pvt) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "user_data为空\n");
@@ -254,44 +296,18 @@ static switch_bool_t read_callback(switch_media_bug_t *bug, void *user_data, swi
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "bug不能为空\n");
 			return SWITCH_FALSE;
 		}
-		switch_core_session_t *sess = switch_core_media_bug_get_session(bug);
-		if (nullptr == sess) {
+		if (nullptr == pvt->session) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "获取session失败\n");
 			return SWITCH_FALSE;
 		}
-
-		char filename[512] = {0};
-		sprintf(filename, "d:/%s.pcm", switch_core_session_get_uuid(sess));
-		FILE *fp = fopen(filename, "wb+");
-		if (!fp) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "创建文件失败：%s\n", filename);
-			return SWITCH_FALSE;
-		}
-		switch_channel_t *channel = switch_core_session_get_channel(sess);
-		if (channel == nullptr) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "获取channel失败\n");
-			return SWITCH_FALSE;
-		}
-		switch_channel_set_private(channel, "record_fp", fp);
 
 	} else if (SWITCH_ABC_TYPE_READ_REPLACE == type) {
 		if (bug == nullptr) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "bug不能为空\n");
 			return SWITCH_FALSE;
 		}
-		switch_core_session_t *sess = switch_core_media_bug_get_session(bug);
-		if (nullptr == sess) {
+		if (nullptr == pvt->session) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "获取session失败\n");
-			return SWITCH_FALSE;
-		}
-		switch_channel_t *channel = switch_core_session_get_channel(sess);
-		if (channel == nullptr) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "获取channel失败\n");
-			return SWITCH_FALSE;
-		}
-		FILE *fp = (FILE *)switch_channel_get_private(channel, "record_fp");
-		if (fp == nullptr) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "userdata参数为空\n");
 			return SWITCH_FALSE;
 		}
 
@@ -324,48 +340,48 @@ static switch_bool_t read_callback(switch_media_bug_t *bug, void *user_data, swi
 													   pvt->destination_number.c_str());
 						switch_event_fire(&event);
 					}
+
+					{ // 打开文件
+						char filename[512] = {0};
+						sprintf(filename, "d:/%s%d.pcm", switch_core_session_get_uuid(pvt->session),word);
+						pvt->filename = filename;
+						pvt->fp = fopen(filename, "wb+");
+						if (!pvt->fp) {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "创建文件失败：%s\n", filename);
+							return SWITCH_FALSE;
+						}
+					}
 				}
 
 				pvt->isSpeakStart = true;
 				pvt->muteFrames = 0;
 
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "|%d||||||||||||||||||||||||||||%d\n", word,
-								  pvt->pcmBufLen);
+				/*switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "|%d||||||||||||||||||||||||||||%d\n", word,
+								  pvt->pcmBufLen);*/
 			} else {
 				pvt->muteFrames++;
 				if (pvt->muteFrames > MUTE_FRAMES) { pvt->isSpeakStart = false; }
 
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "|%d\t%d\tmute:%d\n", word, pvt->pcmBufLen,
-								  pvt->muteFrames);
+				/*switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "|%d\t%d\tmute:%d\n", word, pvt->pcmBufLen,
+								  pvt->muteFrames);*/
 			}
 
 			// 静音50个包，并且有0.2秒以上的语音才写入
 			if (pvt->isSpeakStart && pvt->muteFrames >= MUTE_FRAMES && pvt->pcmBufLen >= dataLen * 10) {
-				/*Asr asr;
-				auto ret = asr.xfAsr("5adf1c1e", "8a413009f6cfa9346692736688361bfa", pvt->pcmBuf, pvt->pcmBufLen);
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "asr\tword:%d\tcode:%d\tmsg:%s\n", word,
-								  ret->code, ret->text);
-				delete ret;*/
 
-				fwrite(pvt->pcmBuf, pvt->pcmBufLen, 1, fp);
-				pvt->pcmBufLen = 0;
+				// 将客户说的话保存到文件，并关闭文件。
+				fwrite(pvt->pcmBuf, pvt->pcmBufLen, 1, pvt->fp);
+				fclose(pvt->fp);
+
+				switch_thread_t *thread;
+				switch_threadattr_t *attr;
+				
+				auto pool = switch_core_session_get_pool(pvt->session);
+				switch_threadattr_create(&attr, pool);
+				switch_thread_create(&thread, attr, (switch_thread_start_t)asr, pvt, pool);
+				
 				word++;
-
-				{
-
-					switch_event_t *event = NULL;
-					if (switch_event_create(&event, SWITCH_EVENT_CUSTOM) == SWITCH_STATUS_SUCCESS) {
-						event->subclass_name = strdup("asr::end_speak");
-						switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Event-Name", event->subclass_name);
-						switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Caller-Unique-ID",
-													   pvt->uuid.c_str());
-						switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Caller-Destination-Number",
-													   pvt->destination_number.c_str());
-						switch_event_fire(&event);
-					}
-				}
 			}
-
 			/*switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
 							 "record\t=>type:%d\tlen:%d\tchannels:%d\trate:%d\tsamples:%d\n", type, dataLen,
 							 frame->channels, frame->rate, frame->samples);*/
@@ -373,27 +389,8 @@ static switch_bool_t read_callback(switch_media_bug_t *bug, void *user_data, swi
 			return SWITCH_TRUE;
 		}
 	} else if (SWITCH_ABC_TYPE_CLOSE == type) {
-		if (bug == nullptr) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "bug不能为空\n");
-			return SWITCH_FALSE;
-		}
-		switch_core_session_t *sess = switch_core_media_bug_get_session(bug);
-		if (nullptr == sess) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "获取session失败\n");
-			return SWITCH_FALSE;
-		}
-		switch_channel_t *channel = switch_core_session_get_channel(sess);
-		if (channel == nullptr) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "获取channel失败\n");
-			return SWITCH_FALSE;
-		}
-		FILE *fp = (FILE *)switch_channel_get_private(channel, "record_fp");
-		if (fp == nullptr) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "userdata参数为空\n");
-			return SWITCH_FALSE;
-		}
-		fclose(fp);
 	}
 
 	return SWITCH_TRUE;
 }
+
