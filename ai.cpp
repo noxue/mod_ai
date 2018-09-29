@@ -13,7 +13,10 @@
 
 using namespace std;
 
+
 typedef struct {
+	// 是否需要语音识别
+	bool asr;
 	switch_media_bug_t *bug;
 	switch_core_session_t *session;
 	switch_channel_t *channel;
@@ -25,6 +28,12 @@ typedef struct {
 	string uuid;			   // 通话的uuid
 	string filename;		   // 保存每一句用于识别的话的路径
 	FILE *fp;				   // 保存每个用于识别的文件句柄
+
+	//讯飞语音识别key
+	struct {
+		string id;
+		string key;
+	} xfyun;
 } switch_no_t;
 
 #define PCM_MAXBUF (sizeof(char) * 160 * 50 * 100)
@@ -38,12 +47,10 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_ai_shutdown);
 SWITCH_MODULE_DEFINITION(mod_ai, mod_ai_load, mod_ai_shutdown, NULL);
 
 SWITCH_STANDARD_APP(ai_app);
-SWITCH_STANDARD_API(asr_start);
-SWITCH_STANDARD_API(asr_stop);
+SWITCH_STANDARD_API(uuid_asr);
 SWITCH_STANDARD_API(uuid_play);
 SWITCH_STANDARD_API(uuid_pause);
 SWITCH_STANDARD_API(uuid_stop);
-SWITCH_STANDARD_API(uuid_asr);
 static switch_bool_t read_callback(switch_media_bug_t *bug, void *user_data, switch_abc_type_t type);
 }
 
@@ -59,8 +66,7 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_ai_load)
 	SWITCH_ADD_APP(app_interface, "ai", "ai机器人", "希高智能电话机器人", ai_app, "", SAF_NONE);
 
 	switch_api_interface_t *api_interface;
-	SWITCH_ADD_API(api_interface, "asr_start", "开始语音识别", asr_start, "");
-	SWITCH_ADD_API(api_interface, "asr_stop", "停止语音识别", asr_start, "");
+	SWITCH_ADD_API(api_interface, "uuid_asr", "是否启用语音识别", uuid_asr, "<uuid> <on|off>");
 	SWITCH_ADD_API(api_interface, "uuid_play", "发送语音", uuid_play, "<uuid> <path>");
 	SWITCH_ADD_API(api_interface, "uuid_pause", "暂停发送语音", uuid_pause, "<uuid> <on|off>");
 	SWITCH_ADD_API(api_interface, "uuid_stop", "停止当前在发的语音", uuid_stop, "<uuid>");
@@ -70,6 +76,13 @@ SWITCH_MODULE_LOAD_FUNCTION(mod_ai_load)
 
 SWITCH_STANDARD_APP(ai_app)
 {
+	char *mycmd = NULL, *argv[4] = {0};
+	int argc = 0;
+
+	if (!zstr(data) && (mycmd = strdup(data))) {
+		argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+	}
+
 	switch_ivr_park_session(session);
 
 	switch_status_t status;
@@ -93,6 +106,8 @@ SWITCH_STANDARD_APP(ai_app)
 
 	pvt->uuid = switch_channel_get_variable(pvt->channel, "uuid");
 
+	switch_channel_set_private(pvt->channel, "pvt", pvt);
+
 	/*{
 		switch_frame_t *read_frame;
 		status = switch_core_session_read_frame(session, &read_frame, SWITCH_IO_FLAG_NONE, 0);
@@ -100,7 +115,7 @@ SWITCH_STANDARD_APP(ai_app)
 		switch_core_session_write_frame(session, read_frame, SWITCH_IO_FLAG_NONE, 0);
 	}*/
 
-	// if (switch_channel_pre_answer(pvt->channel) != SWITCH_STATUS_SUCCESS) { return ; }
+	 if (switch_channel_pre_answer(pvt->channel) != SWITCH_STATUS_SUCCESS) { return ; }
 
 	if ((status = switch_core_media_bug_add(session, "asr_read", NULL, read_callback, pvt, 0,
 											SMBF_READ_REPLACE | SMBF_NO_PAUSE | SMBF_ONE_ONLY, &(pvt->bug))) !=
@@ -116,9 +131,42 @@ SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_ai_shutdown)
 	return SWITCH_STATUS_SUCCESS;
 }
 
-SWITCH_STANDARD_API(asr_start) { return SWITCH_STATUS_SUCCESS; }
+SWITCH_STANDARD_API(uuid_asr) { 
+	switch_core_session_t *psession = NULL;
+	char *mycmd = NULL, *argv[4] = {0};
+	int argc = 0;
 
-SWITCH_STANDARD_API(asr_stop) { return SWITCH_STATUS_SUCCESS; }
+	if (!zstr(cmd) && (mycmd = strdup(cmd))) {
+		argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+	}
+
+	if (zstr(cmd) || argc < 2 || zstr(argv[0])) {
+		stream->write_function(stream, "-USAGE: %s\n", "<uuid> <on|off>");
+	} else {
+		char *uuid = argv[0];
+		char *dest = argv[1];
+
+		if ((psession = switch_core_session_locate(uuid))) {
+			switch_channel_t *channel = switch_core_session_get_channel(psession);
+
+			auto *pvt = (switch_no_t *)switch_channel_get_private(channel, "pvt");
+			if (pvt == nullptr) { return SWITCH_STATUS_FALSE; }
+			if (!strcasecmp(dest, "on")) {
+				pvt->asr = true;
+			} else {
+				pvt->asr = false;
+			}
+
+			switch_core_session_rwunlock(psession);
+
+		} else {
+			stream->write_function(stream, "-ERR No such channel!\n");
+		}
+	}
+
+	switch_safe_free(mycmd);
+	return SWITCH_STATUS_SUCCESS;
+}
 
 SWITCH_STANDARD_API(uuid_play)
 {
@@ -251,15 +299,22 @@ SWITCH_STANDARD_API(uuid_stop)
 	return SWITCH_STATUS_SUCCESS;
 }
 
-SWITCH_STANDARD_API(uuid_asr) { return SWITCH_STATUS_SUCCESS; }
 
 
 void *asr(switch_thread_t *thread,void *data)
 {
 	switch_no_t *pvt = (switch_no_t *)data;
 
+
+
 	Asr asr;
-	auto ret = asr.xfAsr("5adf1c1e", "8a413009f6cfa9346692736688361bfa", pvt->pcmBuf, pvt->pcmBufLen);
+	Result *ret = nullptr;
+	bool bAsr = pvt->asr;
+
+	if (bAsr) { 
+		ret = asr.xfAsr("5adf1c1e", "8a413009f6cfa9346692736688361bfa", pvt->pcmBuf, pvt->pcmBufLen);
+	}
+	
 
 	pvt->pcmBufLen = 0;
 
@@ -271,8 +326,10 @@ void *asr(switch_thread_t *thread,void *data)
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Caller-Unique-ID", pvt->uuid.c_str());
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Caller-Destination-Number",
 										   pvt->destination_number.c_str());
-			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Word", ret->text.c_str());
-			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "filename", pvt->filename.c_str());
+
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Asr", bAsr?"on":"off");
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Word", ret!=nullptr?ret->text.c_str():"");
+			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "File", ret!=nullptr?pvt->filename.c_str():"");
 			cout << ret->text.c_str() << endl;
 			switch_event_fire(&event);
 		}
@@ -331,7 +388,6 @@ static switch_bool_t read_callback(switch_media_bug_t *bug, void *user_data, swi
 				if (!pvt->isSpeakStart) {
 					switch_event_t *event = NULL;
 					if (switch_event_create(&event, SWITCH_EVENT_CUSTOM) == SWITCH_STATUS_SUCCESS) {
-
 						event->subclass_name = strdup("asr::start_speak");
 						switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Event-Name", event->subclass_name);
 						switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Caller-Unique-ID",
