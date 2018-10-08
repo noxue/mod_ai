@@ -330,7 +330,7 @@ void *asr(switch_thread_t *thread,void *data)
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Asr", bAsr?"on":"off");
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Word", ret!=nullptr?ret->text.c_str():"");
 			switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "File", ret!=nullptr?pvt->filename.c_str():"");
-			cout << ret->text.c_str() << endl;
+			
 			switch_event_fire(&event);
 		}
 	}
@@ -399,7 +399,7 @@ static switch_bool_t read_callback(switch_media_bug_t *bug, void *user_data, swi
 
 					{ // 打开文件
 						char filename[512] = {0};
-						sprintf(filename, "d:/%s%d.pcm", switch_core_session_get_uuid(pvt->session),word);
+						sprintf(filename, "d:/pcm/%s%d.pcm", switch_core_session_get_uuid(pvt->session),word);
 						pvt->filename = filename;
 						pvt->fp = fopen(filename, "wb+");
 						if (!pvt->fp) {

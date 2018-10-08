@@ -70,8 +70,8 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <IncludePath>D:\projects\c\freeswitch\src\include;D:\projects\c\audio_process\source\vad\include;D:\projects\c\freeswitch\libs\curl-7.59.0\include;$(IncludePath)</IncludePath>
-    <LibraryPath>D:\projects\c\audio_process\win_lib_vc;D:\projects\c\freeswitch\libs\curl-7.59.0\binaries\Win32\Release;$(LibraryPath)</LibraryPath>
+    <IncludePath>e:\projects\c\freeswitch\src\include;e:\projects\c\audio_process\source\vad\include;e:\projects\c\freeswitch\libs\curl-7.59.0\include;$(IncludePath)</IncludePath>
+    <LibraryPath>e:\projects\c\audio_process\win_lib_vc;e:\projects\c\freeswitch\libs\curl-7.59.0\binaries\Win32\Release;$(LibraryPath)</LibraryPath>
     <OutDir>$(SolutionDir)Win32\Debug\mod</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
