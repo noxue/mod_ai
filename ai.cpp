@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdio.h>
 #include <switch.h>
+#include <vector>
 
 #if defined(_WIN32) || defined(_WIN64)
 #pragma comment(lib, "FreeSwitchCore.lib")
@@ -28,7 +29,7 @@ typedef struct {
 	string uuid;			   // 通话的uuid
 	string filename;		   // 保存每一句用于识别的话的路径
 	FILE *fp;				   // 保存每个用于识别的文件句柄
-
+	
 	//讯飞语音识别key
 	struct {
 		string id;
